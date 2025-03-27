@@ -1,0 +1,1000 @@
+---
+title: "Valuing Artwork - Machine Learning Final Project"
+author: "Yun-Shiuan Hsu and Elisabeth Gangwer"
+output:
+  html_document:
+    df_print: paged
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r}
+# Load in the data 
+load("D:/Party in the USA/Schools/Notre Dame/New Begining/06 Classes/Machine Learning/Final_Assignment/final_project_data.RData")
+library(ggplot2)
+library(naniar) # Load nanair for missing data visualization
+library(OneR) 
+library(dplyr)
+library(gam)
+library(neuralnet)
+library(mice)
+library(xgboost)
+library(Metrics)
+library(randomForest)
+library(caret)
+library(forecast)
+library(rpart)
+library(rattle) 
+library(rpart.plot)       
+library(RColorBrewer) 
+library(xgboostExplainer)
+library(pROC)
+```
+
+
+## Load in Data and Create Material Factors
+```{r}
+# Creating our data frame, pull out top 10 materials -- make it binary 
+art_dat <- art_data[,5:23]
+# Canvas
+canvas <- rep(0, nrow(art_dat))
+canvas[grep("canvas", art_dat$material)] <- 1
+art_dat$canvas <- as.factor(canvas)
+
+paper <- rep(0, nrow(art_dat))
+paper[grep("paper",art_dat$material)] <- 1
+art_dat$paper <- as.factor(paper)
+
+prints <- rep(0, nrow(art_dat))
+prints[grep("prints",art_dat$material)] <- 1
+art_dat$prints <- as.factor(prints)
+
+ink <- rep(0, nrow(art_dat))
+ink[grep("ink",art_dat$material)] <- 1
+art_dat$ink <- as.factor(ink)
+
+board <- rep(0, nrow(art_dat))
+board[grep("board",art_dat$material)] <- 1
+art_dat$board <- as.factor(board)
+
+wove <- rep(0, nrow(art_dat))
+wove[grep("wove",art_dat$material)] <- 1
+art_dat$wove <- as.factor(wove)
+
+
+etching <- rep(0, nrow(art_dat))
+etching[grep("etching",art_dat$material)] <- 1
+art_dat$etching <- as.factor(etching)
+
+lithograph <- rep(0, nrow(art_dat))
+lithograph[grep("lithograph",art_dat$material)] <- 1
+art_dat$lithograph <- as.factor(lithograph)
+
+art_dat <- art_dat[, c(1, 14, 3:13, 15:27)]
+art_dat$FaceCount <- as.numeric(art_dat$FaceCount)
+str(art_dat)
+```
+
+
+## Fix Missing Height & Weight features 
+```{r}
+set.seed(111111)
+feat_vars <- names(art_dat)[3:4]
+imputed_values <- mice( data = art_dat[, feat_vars], 
+                        m = 1, 
+                        maxit = 40, 
+                        method = "cart", 
+                        print = FALSE)
+summary(imputed_values)
+art_dat[, feat_vars] <- complete(imputed_values,1)
+summary(art_dat[,feat_vars])
+```
+
+
+## Separate into training and test data, 80% training, 20% test data 
+```{r}
+
+set.seed(111111)
+total_obs <- dim(art_dat)[1]
+
+train_data_indices <- sample(1:total_obs, 0.8*total_obs)
+train_dat <- art_dat[train_data_indices, ][, -1]
+test_dat <- art_dat[-train_data_indices, ]
+train_obs <- dim(train_dat)[1]
+
+```
+
+## Run a linear regression & random forest 
+```{r}
+lm1 <- lm(log_price ~ ., data = train_dat)
+summary(lm1)
+# R-Squared of 0.4647
+
+# Try a random forest 
+set.seed(111111)
+bag_mod <- randomForest(log_price ~., # Set tree formula
+                data = train_dat, # Set dataset
+                mtry = 24, # Set mtry to number of variables 
+                ntree = 20)
+
+bag_predict <- exp(predict(bag_mod, test_dat)) - 1
+rmse(bag_predict, test_dat$price)
+#RMSE: 2,197,950 
+
+lm_pred <- exp(predict(lm1, newdata=test_dat)) - 1 
+rmse(lm_pred, test_dat$price)
+#RMSE: 2,436,931
+
+```
+
+## Try an XGboost Model
+```{r}
+train_dat1 <- model.matrix(log_price ~ ., data = train_dat)[,-1]
+train_dat1 <- cbind.data.frame(train_dat$log_price, train_dat1)
+colnames(train_dat1)[1] <- "log_price"
+
+test_dat1 <- model.matrix(log_price ~ ., data = test_dat)[,-1]
+test_dat1 <- test_dat1[,-1]
+test_dat1 <- cbind.data.frame(test_dat$log_price, test_dat1)
+colnames(test_dat1)[1] <- "log_price"
+
+# Create training matrix
+dtrain <- xgb.DMatrix(data = as.matrix(train_dat1[, 2:32]), 
+                      label = as.numeric(train_dat1$log_price))
+# Create test matrix
+dtest <- xgb.DMatrix(data = as.matrix(test_dat1[, 2:32]), 
+                     label = as.numeric(test_dat1$log_price))
+
+set.seed(111111)
+bst_1 <- xgboost(data = dtrain, 
+               nrounds = 1000, 
+               verbose = 1, 
+               print_every_n = 20)
+boost_preds_1 <- exp(predict(bst_1, dtest))-1
+pred_dat <- cbind.data.frame(boost_preds_1 , test_dat$price)
+
+bst1_rmse <- rmse(test_dat$price, boost_preds_1)
+bst1_rmse 
+```
+First XGboost w/ no tuning: 
+`bst_1` RMSE: 2,187,908
+
+### Tune the model -- Find the optimal number of iterations to use
+```{r}
+set.seed(111111)
+bst <- xgb.cv(data = dtrain,
+              nfold = 5, 
+              eta = 0.1,
+              nrounds = 1500,
+              early_stopping_rounds = 100, 
+              verbose = 1,
+              nthread = 1, 
+              print_every_n = 20)
+```
+`bst` best iteration is 233. 
+
+### Tune the model -- Find the optimal max-depth and min-child weight
+```{r}
+# Tune the max-depth and min-child-weight 
+max_depth_vals <- c(3, 5, 7, 10, 15) # Create vector of max depth values
+min_child_weight <- c(1,3,5,7, 10, 15) # Create vector of min child values
+
+cv_params <- expand.grid(max_depth_vals, min_child_weight)
+names(cv_params) <- c("max_depth", "min_child_weight")
+
+rmse_vec <- rep(NA, nrow(cv_params)) 
+# Loop through results
+for(i in 1:nrow(cv_params)){
+  set.seed(111111)
+  bst_tune <- xgb.cv(data = dtrain, # Set training data
+              
+              nfold = 5, # Use 5 fold cross-validation
+              eta = 0.1, # Set learning rate
+              max.depth = cv_params$max_depth[i], 
+              min_child_weight = cv_params$min_child_weight[i],
+              nrounds = 250, 
+              early_stopping_rounds = 20, 
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 50) 
+  rmse_vec[i] <- bst_tune$evaluation_log$test_rmse_mean[bst_tune$best_ntreelimit]
+}
+```
+
+#### Visualize to find the best max depth and min child weight
+```{r}
+res_db <- cbind.data.frame(cv_params, rmse_vec)
+names(res_db)[3] <- c("rmse") 
+res_db$max_depth <- as.factor(res_db$max_depth) # Convert tree number to factor for plotting
+res_db$min_child_weight <- as.factor(res_db$min_child_weight) # Convert node size to factor for plotting
+# Print RMSE heatmap
+g_1 <- ggplot(res_db, aes(y = max_depth, x = min_child_weight, fill = rmse)) + # set aesthetics
+  geom_tile() + # Use geom_tile for heatmap
+  theme_bw() + # Set theme
+  scale_fill_gradient2(low = "blue", # Choose low color
+    mid = "white", # Choose mid color
+    high = "red", # Choose high color
+    midpoint =mean(res_db$rmse), # Choose mid point
+    space = "Lab", 
+    na.value ="grey", # Choose NA value
+    guide = "colourbar", # Set color bar
+    aesthetics = "fill") + # Select aesthetics to apply
+  labs(x = "Minimum Child Weight", y = "Max Depth", fill = "RMSE") # Set labels
+g_1# Generate plot
+```
+
+Minimum Child Weight -- Model seems to perform best between 5 or 15.
+Max_Depth -- model seems to perform best with a value of 10. 
+Worried about over fitting (max_depth) and under fitting (min_child_weight), look deeper within those ranges 
+
+### Dig deeper into max-depth and min-child-weight
+```{r}
+max_depth_vals <- c(9, 10, 11) # Create vector of max depth values
+min_child_weight <- c(5, 6, 7, 14, 16) # Create vector of min child values
+
+cv_params <- expand.grid(max_depth_vals, min_child_weight)
+names(cv_params) <- c("max_depth", "min_child_weight")
+
+rmse_vec <- rep(NA, nrow(cv_params)) 
+# Loop through results
+
+for(i in 1:nrow(cv_params)){
+  set.seed(111111)
+  bst_tune <- xgb.cv(data = dtrain, # Set training data
+              
+              nfold = 5, # Use 5 fold cross-validation
+              eta = 0.1, # Set learning rate
+              max.depth = cv_params$max_depth[i], 
+              min_child_weight = cv_params$min_child_weight[i],
+              nrounds = 250, 
+              early_stopping_rounds = 20, 
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 100) 
+  rmse_vec[i] <- bst_tune$evaluation_log$test_rmse_mean[bst_tune$best_ntreelimit]
+}
+```
+
+#### Visualize again
+```{r}
+# Visualize to find the best max depth and min child weight again
+res_db <- cbind.data.frame(cv_params, rmse_vec)
+names(res_db)[3] <- c("rmse") 
+res_db$max_depth <- as.factor(res_db$max_depth) # Convert tree number to factor for plotting
+res_db$min_child_weight <- as.factor(res_db$min_child_weight) # Convert node size to factor for plotting
+# Print RMSE heatmap
+g_2 <- ggplot(res_db, aes(y = max_depth, x = min_child_weight, fill = rmse)) + # set aesthetics
+  geom_tile() + # Use geom_tile for heatmap
+  theme_bw() + # Set theme
+  scale_fill_gradient2(low = "blue", # Choose low color
+    mid = "white", # Choose mid color
+    high = "red", # Choose high color
+    midpoint =mean(res_db$rmse), # Choose mid point
+    space = "Lab", 
+    na.value ="grey", # Choose NA value
+    guide = "colourbar", # Set color bar
+    aesthetics = "fill") + # Select aesthetics to apply
+  labs(x = "Minimum Child Weight", y = "Max Depth", fill = "RMSE") # Set labels
+g_2# Generate plot
+```
+Minimum Child Weight of 5 and a max depth of 11 seems to have the lowest rmse score, increase minimum child weight to see if there is more improvement
+
+
+### Tune the gamma values
+```{r}
+# Tune the gamma values
+gamma_vals <- c(0, 0.05, 0.1, 0.15, 0.2)
+set.seed(111111)
+rmse_vec <- rep(NA, length(gamma_vals))
+for(i in 1:length(gamma_vals)){
+  bst_tune <- xgb.cv(data = dtrain, 
+              nfold = 5,
+              eta = 0.1, 
+              max.depth = 11, 
+              min_child_weight = 5, 
+              gamma = gamma_vals[i], 
+              nrounds = 250, 
+              early_stopping_rounds = 20,
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 50) 
+  rmse_vec[i] <- bst_tune$evaluation_log$test_rmse_mean[bst_tune$best_ntreelimit]
+}
+cbind.data.frame(rmse_vec, gamma_vals)
+```
+A gamma value of 0 produces the lowest rmse of 1.294327. 
+
+### Re calibrate the number of rounds
+```{r}
+# Re calibrate the number of rounds
+  bst_tune <- xgb.cv(data = dtrain, 
+              nfold = 5,
+              eta = 0.1, 
+              max.depth = 11, 
+              min_child_weight = 5, 
+              gamma = 0, 
+              nrounds = 300, 
+              early_stopping_rounds = 50,
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 50) 
+```
+
+The best iteration is 83 with a test-rmse of 1.293877. Will go for 100 rounds. 
+
+### Tune the subsample and the colsample
+```{r}
+
+subsample <- c(0.6, 0.7, 0.8, 0.9, 1) 
+colsample_by_tree <- c(0.6, 0.7, 0.8, 0.9, 1) 
+
+# Expand grid of tuning parameters
+cv_params <- expand.grid(subsample, colsample_by_tree)
+names(cv_params) <- c("subsample", "colsample_by_tree")
+# Create vectors to store results
+rmse_vec <-rep(NA, nrow(cv_params)) 
+
+for(i in 1:nrow(cv_params)){
+  set.seed(111111)
+  bst_tune <- xgb.cv(data = dtrain, 
+              nfold = 5,
+              eta = 0.1, 
+              max.depth = 11, 
+              min_child_weight = 5, 
+              gamma = 0, 
+              subsample = cv_params$subsample[i],
+              colsample_bytree = cv_params$colsample_by_tree[i],
+              nrounds = 100, 
+              early_stopping_rounds = 20,
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 20) 
+  rmse_vec[i] <- bst_tune$evaluation_log$test_rmse_mean[bst_tune$best_ntreelimit]
+}
+```
+
+#### Visualize 
+```{r}
+# Visualize
+res_db <- cbind.data.frame(cv_params, rmse_vec)
+names(res_db)[3] <- c("rmse") 
+res_db$subsample <- as.factor(res_db$subsample) # Convert tree number to factor for plotting
+res_db$colsample_by_tree <- as.factor(res_db$colsample_by_tree) # Convert node size to factor for plotting
+g_4 <- ggplot(res_db, aes(y = colsample_by_tree, x = subsample, fill = rmse)) + # set aesthetics
+  geom_tile() + # Use geom_tile for heatmap
+  theme_bw() + # Set theme
+  scale_fill_gradient2(low = "blue", # Choose low color
+    mid = "white", # Choose mid color
+    high = "red", # Choose high color
+    midpoint =mean(res_db$rmse), # Choose mid point
+    space = "Lab", 
+    na.value ="grey", # Choose NA value
+    guide = "colourbar", # Set color bar
+    aesthetics = "fill") + # Select aesthetics to apply
+  labs(x = "Subsample", y = "Column Sample by Tree", fill = "rmse") # Set labels
+g_4
+res_db
+```
+A 0.7 column sample and a 1 sample produced the lowest RMSE of 1.295184. 
+
+### Try different ETA's 
+Apply the optimal max-depth, min-child-weight, gamma, subsample, and colsample, finally increase the number of rounds to find the best ETA (learning rate). 
+
+```{r}
+# Try different ETA's 
+set.seed(111111)
+bst_mod_1 <- xgb.cv(data = dtrain, 
+              nfold = 5,
+              eta = 0.1, # eta of 0.1
+              max.depth = 11, 
+              min_child_weight = 5, 
+              gamma = 0, 
+              subsample = 1,
+              colsample_bytree = 0.7,
+              nrounds = 500, 
+              early_stopping_rounds = 20,
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 50)
+```
+
+
+```{r}
+set.seed(111111)
+bst_mod_2 <- xgb.cv(data = dtrain, 
+              nfold = 5,
+              eta = 0.01, # eta of 0.01
+              max.depth = 11, 
+              min_child_weight = 5, 
+              gamma = 0, 
+              subsample = 1,
+              colsample_bytree = 0.7,
+              nrounds = 500, 
+              early_stopping_rounds = 20,
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 50)
+```
+
+
+```{r}
+set.seed(111111)
+bst_mod_3 <- xgb.cv(data = dtrain, 
+              nfold = 5,
+              eta = 0.05, # eta of 0.05
+              max.depth = 11, 
+              min_child_weight = 5, 
+              gamma = 0, 
+              subsample = 1,
+              colsample_bytree = 0.7,
+              nrounds = 500, 
+              early_stopping_rounds = 20,
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 50)
+```
+
+
+```{r}
+set.seed(111111)
+bst_mod_4 <- xgb.cv(data = dtrain, 
+              nfold = 5,
+              eta = 0.005, # eta of 0.005
+              max.depth = 11, 
+              min_child_weight = 5, 
+              gamma = 0, 
+              subsample = 1,
+              colsample_bytree = 0.7,
+              nrounds = 500, 
+              early_stopping_rounds = 20,
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 50)
+```
+
+
+```{r}
+set.seed(111111)
+bst_mod_5 <- xgb.cv(data = dtrain, 
+              nfold = 5,
+              eta = 0.3, # eta of 0.3
+              max.depth = 11, 
+              min_child_weight = 5, 
+              gamma = 0, 
+              subsample = 1,
+              colsample_bytree = 0.7,
+              nrounds = 500, 
+              early_stopping_rounds = 20,
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 50) 
+```
+
+#### Visualize the best eta 
+
+```{r}
+pd1 <- cbind.data.frame(bst_mod_1$evaluation_log[,c("iter", "test_rmse_mean")],
+                        rep(0.1,nrow(bst_mod_1$evaluation_log)))
+names(pd1)[3] <- "eta"
+
+pd2 <- cbind.data.frame(bst_mod_2$evaluation_log[,c("iter", "test_rmse_mean")],
+                        rep(0.01,nrow(bst_mod_2$evaluation_log)))
+names(pd2)[3] <- "eta"
+
+pd3 <- cbind.data.frame(bst_mod_3$evaluation_log[,c("iter", "test_rmse_mean")],
+                        rep(0.05,nrow(bst_mod_3$evaluation_log)))
+names(pd3)[3] <- "eta"
+
+pd4 <- cbind.data.frame(bst_mod_4$evaluation_log[,c("iter", "test_rmse_mean")],
+                        rep(0.005,nrow(bst_mod_4$evaluation_log)))
+names(pd4)[3] <- "eta"
+
+pd5 <- cbind.data.frame(bst_mod_5$evaluation_log[,c("iter", "test_rmse_mean")],
+                        rep(0.3,nrow(bst_mod_5$evaluation_log)))
+names(pd5)[3] <- "eta"
+
+
+plot_data <- rbind.data.frame(pd1, pd2, pd3, pd4, pd5)
+plot_data$eta <- as.factor(plot_data$eta)
+g_5 <- ggplot(plot_data, aes(x = iter, y = test_rmse_mean, color = eta))+
+  geom_point(alpha = 0.5) +
+  theme_bw() + # Set theme
+  theme(panel.grid.major = element_blank(), # Remove grid
+        panel.grid.minor = element_blank(), # Remove grid
+        panel.border = element_blank(), # Remove grid
+        panel.background = element_blank()) + # Remove grid 
+  labs(x = "Number of Trees", title = "RMSE v Number of Trees",
+       y = "RMSE", color = "Learning \n Rate")  # Set labels
+g_5
+g_6 <- ggplot(plot_data, aes(x = iter, y = test_rmse_mean, color = eta))+
+  geom_smooth(alpha = 0.5) +
+  theme_bw() + # Set theme
+  theme(panel.grid.major = element_blank(), # Remove grid
+        panel.grid.minor = element_blank(), # Remove grid
+        panel.border = element_blank(), # Remove grid
+        panel.background = element_blank()) + # Remove grid 
+  labs(x = "Number of Trees", title = "RMSE v Number of Trees",
+       y = "RMSE", color = "Learning \n Rate")  # Set labels
+g_6
+# which.min(plot_data$test_rmse_mean)
+# plot_data[845, ]
+```
+An eta of 0.05 seems to provide the smallest rmse value and 212th iteration.
+
+### Best Model 
+```{r}
+set.seed(111111)
+bst_best <- xgboost(data = dtrain, 
+              nfold = 5,
+              eta = 0.05, 
+              max.depth = 11, 
+              min_child_weight = 5, 
+              gamma = 0, 
+              subsample = 1,
+              colsample_bytree = 0.7,
+              nrounds = 300, 
+              early_stopping_rounds = 20,
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 50) 
+
+bst_best_pred <- exp(predict(bst_best, dtest)) - 1
+pred_dat_best <- cbind.data.frame(bst_best_pred, test_dat$price)
+rmse <- sqrt(mean((bst_best_pred - test_dat$price)^2))
+rmse
+rmse_val <- rmse(test_dat$price, bst_best_pred)
+rmse_val
+```
+
+
+First XGboost w/ no tuning: 
+`bst_1` RMSE: 2,187,908
+After tuning: 
+RMSE: 2,228,431
+
+## Variable Importance 
+```{r}
+imp_mat <- xgb.importance(model = bst_best)
+# Plot importance (top 10 variables)
+xgb.plot.importance(imp_mat, top_n = 10)
+```
+
+Top 3 values are well_known, canvas, height. 
+Run the same xgboost model but remove dominant colors, brightness, highbrightnessPerc, CornerPerc, facecount, and material features and try again
+
+```{r}
+train_dat2 <- train_dat[ , c(1:3, 6, 7, 9, 11, 13, 17, 18, 21)]
+test_dat2 <- test_dat[ , c(1:4, 7, 8, 10, 12, 14, 18, 19, 22)]
+str(train_dat2)
+str(test_dat2)
+```
+
+#### Try an xgBoost model 
+```{r}
+train_dat3 <- model.matrix(log_price ~ ., data = train_dat2)[,-1]
+train_dat3 <- cbind.data.frame(train_dat2$log_price, train_dat3)
+colnames(train_dat3)[1] <- "log_price"
+
+test_dat3 <- model.matrix(log_price ~ ., data = test_dat2)[,-1]
+test_dat3 <- test_dat3[,-1]
+test_dat3 <- cbind.data.frame(test_dat2$log_price, test_dat3)
+colnames(test_dat3)[1] <- "log_price"
+
+# Create training matrix
+dtrain <- xgb.DMatrix(data = as.matrix(train_dat3[, 2:11]), 
+                      label = as.numeric(train_dat3$log_price))
+# Create test matrix
+dtest <- xgb.DMatrix(data = as.matrix(test_dat3[, 2:11]), 
+                     label = as.numeric(test_dat3$log_price))
+
+set.seed(111111)
+bst_1 <- xgboost(data = dtrain, 
+               nrounds = 1000, 
+               verbose = 1, 
+               print_every_n = 20)
+
+boost_preds_1 <- exp(predict(bst_1, dtest))-1
+pred_dat <- cbind.data.frame(boost_preds_1 , test_dat$price)
+
+bst1_rmse <- rmse(test_dat$price, boost_preds_1)
+bst1_rmse 
+```
+RMSE: 2,277,902
+
+#### Run the same best xgBoost Model with less features
+```{r}
+set.seed(111111)
+bst_best <- xgboost(data = dtrain, 
+              nfold = 5,
+              eta = 0.05, 
+              max.depth = 11, 
+              min_child_weight = 5, 
+              gamma = 0, 
+              subsample = 1,
+              colsample_bytree = 0.7,
+              nrounds = 250, 
+              early_stopping_rounds = 20,
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 50) 
+bst_best_pred <- exp(predict(bst_best, dtest)) - 1
+pred_dat_best <- cbind.data.frame(bst_best_pred, test_dat$price)
+rmse <- sqrt(mean((bst_best_pred - test_dat$price)^2))
+rmse
+```
+RMSE: 2,248,084
+
+#### Find the optimal iterations 
+
+```{r}
+set.seed(111111)
+bst <- xgb.cv(data = dtrain,
+              nfold = 5, 
+              eta = 0.1,
+              nrounds = 1000,
+              early_stopping_rounds = 100, 
+              verbose = 1,
+              nthread = 1, 
+              print_every_n = 20)
+```
+Best iteration - 141, number of rounds will be set to 200. 
+
+#### Tune max-depth and min-child 
+```{r}
+# Tune the max-depth and min-child-weight 
+max_depth_vals <- c(5, 7, 10, 15) # Create vector of max depth values
+min_child_weight <- c(5,7, 10, 15) # Create vector of min child values
+
+cv_params <- expand.grid(max_depth_vals, min_child_weight)
+names(cv_params) <- c("max_depth", "min_child_weight")
+
+rmse_vec <- rep(NA, nrow(cv_params)) 
+# Loop through results
+for(i in 1:nrow(cv_params)){
+  set.seed(111111)
+  bst_tune <- xgb.cv(data = dtrain, # Set training data
+              
+              nfold = 5, # Use 5 fold cross-validation
+              eta = 0.1, # Set learning rate
+              max.depth = cv_params$max_depth[i], 
+              min_child_weight = cv_params$min_child_weight[i],
+              nrounds = 200, 
+              early_stopping_rounds = 20, 
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 50) 
+  rmse_vec[i] <- bst_tune$evaluation_log$test_rmse_mean[bst_tune$best_ntreelimit]
+}
+```
+Visualize the min_child & max_depth
+```{r}
+# Visualize to find the best max depth and min child weight
+res_db <- cbind.data.frame(cv_params, rmse_vec)
+names(res_db)[3] <- c("rmse") 
+res_db$max_depth <- as.factor(res_db$max_depth) # Convert tree number to factor for plotting
+res_db$min_child_weight <- as.factor(res_db$min_child_weight) # Convert node size to factor for plotting
+# Print RMSE heatmap
+g_1 <- ggplot(res_db, aes(y = max_depth, x = min_child_weight, fill = rmse)) + # set aesthetics
+  geom_tile() + # Use geom_tile for heatmap
+  theme_bw() + # Set theme
+  scale_fill_gradient2(low = "blue", # Choose low color
+    mid = "white", # Choose mid color
+    high = "red", # Choose high color
+    midpoint =mean(res_db$rmse), # Choose mid point
+    space = "Lab", 
+    na.value ="grey", # Choose NA value
+    guide = "colourbar", # Set color bar
+    aesthetics = "fill") + # Select aesthetics to apply
+  labs(x = "Minimum Child Weight", y = "Max Depth", fill = "RMSE") # Set labels
+g_1
+```
+Max-depth produces lowest rmse around 10 and minimum child weight produces lowest around 7. Get a closer range...
+
+```{r}
+max_depth_vals <- c(9, 10, 11) # Create vector of max depth values
+min_child_weight <- c(6, 7, 10, 12, 14, 16) # Create vector of min child values
+
+cv_params <- expand.grid(max_depth_vals, min_child_weight)
+names(cv_params) <- c("max_depth", "min_child_weight")
+
+rmse_vec <- rep(NA, nrow(cv_params)) 
+# Loop through results
+for(i in 1:nrow(cv_params)){
+  set.seed(111111)
+  bst_tune <- xgb.cv(data = dtrain, # Set training data
+              nfold = 5, # Use 5 fold cross-validation
+              eta = 0.1, # Set learning rate
+              max.depth = cv_params$max_depth[i], 
+              min_child_weight = cv_params$min_child_weight[i],
+              nrounds = 200, 
+              early_stopping_rounds = 20, 
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 100) 
+  rmse_vec[i] <- bst_tune$evaluation_log$test_rmse_mean[bst_tune$best_ntreelimit]
+}
+```
+
+
+
+```{r}
+# Visualize to find the best max depth and min child weight
+res_db <- cbind.data.frame(cv_params, rmse_vec)
+names(res_db)[3] <- c("rmse") 
+res_db$max_depth <- as.factor(res_db$max_depth) # Convert tree number to factor for plotting
+res_db$min_child_weight <- as.factor(res_db$min_child_weight) # Convert node size to factor for plotting
+# Print RMSE heatmap
+g_2 <- ggplot(res_db, aes(y = max_depth, x = min_child_weight, fill = rmse)) + # set aesthetics
+  geom_tile() + # Use geom_tile for heatmap
+  theme_bw() + # Set theme
+  scale_fill_gradient2(low = "blue", # Choose low color
+    mid = "white", # Choose mid color
+    high = "red", # Choose high color
+    midpoint =mean(res_db$rmse), # Choose mid point
+    space = "Lab", 
+    na.value ="grey", # Choose NA value
+    guide = "colourbar", # Set color bar
+    aesthetics = "fill") + # Select aesthetics to apply
+  labs(x = "Minimum Child Weight", y = "Max Depth", fill = "RMSE") # Set labels
+g_2
+
+```
+A max-depth of 11 and minimum child weight of 14 produces the lowest test-rmse:1.327904.
+
+#### Tune the gamma value
+```{r}
+gamma_vals <- c(0, 0.05, 0.1, 0.15, 0.2)
+set.seed(111111)
+rmse_vec <- rep(NA, length(gamma_vals))
+for(i in 1:length(gamma_vals)){
+  bst_tune <- xgb.cv(data = dtrain, 
+              nfold = 5,
+              eta = 0.1, 
+              max.depth = 11, 
+              min_child_weight = 14, 
+              gamma = gamma_vals[i], 
+              nrounds = 200, 
+              early_stopping_rounds = 20,
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 50) 
+  rmse_vec[i] <- bst_tune$evaluation_log$test_rmse_mean[bst_tune$best_ntreelimit]
+}
+cbind.data.frame(rmse_vec, gamma_vals)
+```
+A gamma of 0.15 produces the lowest rmse of 1.326879. 
+
+#### Re calibrate the model 
+```{r}
+set.seed(111111)
+bst_tune <- xgb.cv(data = dtrain, 
+              nfold = 5,
+              eta = 0.1, 
+              max.depth = 11, 
+              min_child_weight = 14, 
+              gamma = 0.15, 
+              nrounds = 300, 
+              early_stopping_rounds = 50,
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 50) 
+```
+
+Best iteration is 73 with test-rmse of 1.328697+0.011858
+
+#### Tune the Subsample and Column Sample
+```{r}
+subsample <- c(0.6, 0.7, 0.8, 0.9, 1) 
+colsample_by_tree <- c(0.6, 0.7, 0.8, 0.9, 1) 
+
+# Expand grid of tuning parameters
+cv_params <- expand.grid(subsample, colsample_by_tree)
+names(cv_params) <- c("subsample", "colsample_by_tree")
+# Create vectors to store results
+rmse_vec <-rep(NA, nrow(cv_params)) 
+
+for(i in 1:nrow(cv_params)){
+  set.seed(111111)
+  bst_tune <- xgb.cv(data = dtrain, 
+              nfold = 5,
+              eta = 0.1, 
+              max.depth = 11, 
+              min_child_weight = 14, 
+              gamma = 0.15, 
+              subsample = cv_params$subsample[i],
+              colsample_bytree = cv_params$colsample_by_tree[i],
+              nrounds = 100, 
+              early_stopping_rounds = 20,
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 20) 
+  rmse_vec[i] <- bst_tune$evaluation_log$test_rmse_mean[bst_tune$best_ntreelimit]
+}
+```
+
+#### Visualize Subsample and Colsample 
+```{r}
+res_db <- cbind.data.frame(cv_params, rmse_vec)
+names(res_db)[3] <- c("rmse") 
+res_db$subsample <- as.factor(res_db$subsample) # Convert tree number to factor for plotting
+res_db$colsample_by_tree <- as.factor(res_db$colsample_by_tree) # Convert node size to factor for plotting
+g_4 <- ggplot(res_db, aes(y = colsample_by_tree, x = subsample, fill = rmse)) + # set aesthetics
+  geom_tile() + # Use geom_tile for heatmap
+  theme_bw() + # Set theme
+  scale_fill_gradient2(low = "blue", # Choose low color
+    mid = "white", # Choose mid color
+    high = "red", # Choose high color
+    midpoint =mean(res_db$rmse), # Choose mid point
+    space = "Lab", 
+    na.value ="grey", # Choose NA value
+    guide = "colourbar", # Set color bar
+    aesthetics = "fill") + # Select aesthetics to apply
+  labs(x = "Subsample", y = "Column Sample by Tree", fill = "rmse") # Set labels
+g_4
+res_db
+```
+A subsample of 0.9 and columnsample of 1 produces the lowest rmse of 1.326228. 
+
+#### Tune the ETA 
+```{r}
+set.seed(111111)
+bst_mod_1 <- xgb.cv(data = dtrain, 
+              nfold = 5,
+              eta = 0.1, # eta of 0.1
+              max.depth = 11, 
+              min_child_weight = 14, 
+              gamma = 0.15, 
+              subsample = 0.9,
+              colsample_bytree = 1,
+              nrounds = 500, 
+              early_stopping_rounds = 20,
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 50)
+```
+
+
+```{r}
+set.seed(111111)
+bst_mod_2 <- xgb.cv(data = dtrain, 
+              nfold = 5,
+              eta = 0.01, # eta of 0.01
+              max.depth = 11, 
+              min_child_weight = 14, 
+              gamma = 0.15, 
+              subsample = 0.9,
+              colsample_bytree = 1,
+              nrounds = 500, 
+              early_stopping_rounds = 20,
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 50)
+```
+
+
+```{r}
+set.seed(111111)
+bst_mod_3 <- xgb.cv(data = dtrain, 
+              nfold = 5,
+              eta = 0.05, # eta of 0.05
+             max.depth = 11, 
+              min_child_weight = 14, 
+              gamma = 0.15, 
+              subsample = 0.9,
+              colsample_bytree = 1,
+              nrounds = 500, 
+              early_stopping_rounds = 20,
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 50)
+```
+
+
+```{r}
+set.seed(111111)
+bst_mod_4 <- xgb.cv(data = dtrain, 
+              nfold = 5,
+              eta = 0.005, # eta of 0.2
+              max.depth = 11, 
+              min_child_weight = 14, 
+              gamma = 0.15, 
+              subsample = 0.9,
+              colsample_bytree = 1,
+              nrounds = 500, 
+              early_stopping_rounds = 20,
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 50)
+```
+
+
+```{r}
+set.seed(111111)
+bst_mod_5 <- xgb.cv(data = dtrain, 
+              nfold = 5,
+              eta = 0.3, # eta of 0.3
+              max.depth = 11, 
+              min_child_weight = 14, 
+              gamma = 0.15, 
+              subsample = 0.9,
+              colsample_bytree = 1,
+              nrounds = 500, 
+              early_stopping_rounds = 20,
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 50) 
+```
+
+#### Visualize 
+```{r}
+pd1 <- cbind.data.frame(bst_mod_1$evaluation_log[,c("iter", "test_rmse_mean")],
+                        rep(0.1,nrow(bst_mod_1$evaluation_log)))
+names(pd1)[3] <- "eta"
+
+pd2 <- cbind.data.frame(bst_mod_2$evaluation_log[,c("iter", "test_rmse_mean")],
+                        rep(0.01,nrow(bst_mod_2$evaluation_log)))
+names(pd2)[3] <- "eta"
+
+pd3 <- cbind.data.frame(bst_mod_3$evaluation_log[,c("iter", "test_rmse_mean")],
+                        rep(0.05,nrow(bst_mod_3$evaluation_log)))
+names(pd3)[3] <- "eta"
+
+pd4 <- cbind.data.frame(bst_mod_4$evaluation_log[,c("iter", "test_rmse_mean")],
+                        rep(0.005,nrow(bst_mod_4$evaluation_log)))
+names(pd4)[3] <- "eta"
+
+pd5 <- cbind.data.frame(bst_mod_5$evaluation_log[,c("iter", "test_rmse_mean")],
+                        rep(0.3,nrow(bst_mod_5$evaluation_log)))
+names(pd5)[3] <- "eta"
+plot_data <- rbind.data.frame(pd1, pd2, pd3, pd4, pd5)
+plot_data$eta <- as.factor(plot_data$eta)
+g_5 <- ggplot(plot_data, aes(x = iter, y = test_rmse_mean, color = eta))+
+  geom_point(alpha = 0.5) +
+  theme_bw() + # Set theme
+  theme(panel.grid.major = element_blank(), # Remove grid
+        panel.grid.minor = element_blank(), # Remove grid
+        panel.border = element_blank(), # Remove grid
+        panel.background = element_blank()) + # Remove grid 
+  labs(x = "Number of Trees", title = "RMSE v Number of Trees",
+       y = "RMSE", color = "Learning \n Rate")  # Set labels
+g_5
+
+g_7 <- ggplot(plot_data, aes(x = iter, y = test_rmse_mean, color = eta))+
+  geom_smooth(alpha = 0.5) +
+  theme_bw() + # Set theme
+  theme(panel.grid.major = element_blank(), # Remove grid
+        panel.grid.minor = element_blank(), # Remove grid
+        panel.border = element_blank(), # Remove grid
+        panel.background = element_blank()) + # Remove grid 
+  labs(x = "Number of Trees", title = "RMSE v Number of Trees",
+       y = "RMSE", color = "Learning \n Rate")  # Set labels
+g_7
+
+```
+An ETA of 0.05 provides the lowest test-rmse:1.322220 at 146st iteration. 
+#### Best Model
+```{r}
+set.seed(111111)
+bst_best <- xgboost(data = dtrain, 
+              eta = 0.05, 
+              max.depth = 11, 
+              min_child_weight = 14, 
+              gamma = 0.15, 
+              subsample = 0.9,
+              colsample_bytree = 1,
+              nrounds = 200, 
+              early_stopping_rounds = 20,
+              verbose = 1, 
+              nthread = 1, 
+              print_every_n = 50) 
+
+bst_best_pred <- exp(predict(bst_best, dtest)) - 1
+pred_dat_best <- cbind.data.frame(bst_best_pred, test_dat$price)
+rmse <- sqrt(mean((bst_best_pred - test_dat$price)^2))
+rmse
+```
+
+Best xgboost model provides an rmse of 2,216,996
+
+
