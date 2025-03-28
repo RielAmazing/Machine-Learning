@@ -137,6 +137,7 @@ will be more precise and provide a more indepth look into art piece price in auc
 houses.
 
 **Reference**
+
 1 Aubry, Mathieu and Kraeussl, Roman and Manso, Gustavo and Spaenjers, Christophe, Biased
 Auctioneers (January 6, 2022). Journal of Finance, Forthcoming, Available at SSRN:
 https://ssrn.com/abstract=3347175 or http://dx.doi.org/10.2139/ssrn.3347175
