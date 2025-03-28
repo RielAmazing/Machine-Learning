@@ -14,7 +14,8 @@ this project fairly interesting since it can allow art buyers and sellers to est
 price of the art piece in hand. Furthermore allowing for the possibility of a machine
 learning model to become an asset to auction houses and artists.
 
-**Related Work**
+**Related Work
+
 Some of the previous work done in art valuation with machine learning, has used a
 neural network model to predict the price of artwork at an auction1. They built this
 model on physical characteristics, visible and non-visible, and used auction house
@@ -25,6 +26,7 @@ learning models are not as accurate, Bailey claims that building a machine learn
 model can increase the speed, cost, volume, and frequency of valuing an artwork.
 
 **Data Description**
+
 The dataset is acquired from GitHub3, the original dataset contains 41,253 objects with
 23 columns(variables). The data was collected by user jasonshi10 6 years ago, where he
 webscrapped the data from ArtInfo.com as a txt file. We have concised the dataset to 17
@@ -59,6 +61,7 @@ them being well known artists. By doing so, we are able to compare and see the i
 of an artist’s fame affects the pricing of an art piece in an auction.
 
 **Methods & Results**
+
 Before building our models, we wanted to determine the best way to deal with the
 missing values in the dataset. The two features that contained missing data are ‘height’
 and ‘width’. Since we believed these were important values for building our model, we
@@ -99,6 +102,7 @@ that the model handled middle-range artwork prices relatively well but struggled
 artworks at both the lower and higher ends of the price spectrum.
 
 **Discussion & Future Work**
+
 Through numerous tests and model building we have discovered that the artists’ fame is
 a crucial variable to our dataset and greatly impacts the valuation of artwork (Figure 7).
 With the importance variables extracted from XGBoost, indicated that our well_known
@@ -125,8 +129,20 @@ decrease the RMSE and for the training model to have a more accurate result on t
 predictions.
 
 **Conclusion**
+
 In conclusion, we have realized that artist fame is a key feature in predicting artwork
 price. It would be valuable to gather more quantifiable information on the artist's
 popularity. With more information on the artist’s popularity, the result of the prediction
 will be more precise and provide a more indepth look into art piece price in auction
 houses.
+
+**Reference**
+1 Aubry, Mathieu and Kraeussl, Roman and Manso, Gustavo and Spaenjers, Christophe, Biased
+Auctioneers (January 6, 2022). Journal of Finance, Forthcoming, Available at SSRN:
+https://ssrn.com/abstract=3347175 or http://dx.doi.org/10.2139/ssrn.3347175
+2 Jason Bailey.(2020).Can Machine Learning Predict the Price of Art at Auction?
+https://www.artnome.com/news/2020/5/5/can-machine-learning-predict-the-price-of-art-at-a
+uction
+3 GitHub: art_auction_valuation, https://github.com/jasonshi10/art_auction_valuation
+4 Edward D Ramirez , Stephen J Hagen, The quantitative measure and statistical distribution of
+fame.(July 6, 2018). https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0200196
